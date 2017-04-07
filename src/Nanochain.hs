@@ -4,6 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 
 module Nanochain where
 
@@ -12,7 +13,7 @@ import Protolude hiding (get, put)
 import Crypto.Hash
 
 import Control.Concurrent (MVar)
-import Control.Arrow ((&&&)) 
+import Control.Arrow ((&&&))
 
 import Data.Aeson hiding (json)
 import Data.Int (Int64)
@@ -32,6 +33,7 @@ import Web.Scotty
 import Network.Socket (HostName, PortNumber)
 
 import qualified Multicast as M
+import qualified Prelude as P
 
 -------------------------------------------------------------------------------
 -- Types
@@ -43,14 +45,24 @@ type Timestamp  = Integer
 type BlockData  = ByteString
 type Blockchain = [Block]
 
-data Block = Block 
+data Block = Block
   { bindex       :: Index        -- ^ Block height
   , previousHash :: Hash         -- ^ Previous block hash
   , timestamp    :: Timestamp    -- ^ Creation timestamp
   , bdata        :: BlockData    -- ^ Block data
   , nonce        :: Int64        -- ^ Nonce for Proof-of-Work
   , bhash        :: Hash         -- ^ Block hash
-  } deriving (Eq, Show, Generic, S.Serialize)
+  } deriving (Eq, Generic, S.Serialize)
+
+instance Show Block where
+  show (Block index pHash ts blockData n bHash) =
+    "Block {" ++
+    "  bindex: " ++ show index ++
+    "  previousHash: " ++ T.unpack (encode64 pHash) ++
+    "  timestamp: " ++ show ts ++
+    "  bdata: " ++ T.unpack (encode64 blockData) ++
+    "  n: " ++ show n ++
+    "  bHash: " ++ T.unpack (encode64 bHash)
 
 -------------------------------------------------------------------------------
 -- Block Hashing
@@ -59,14 +71,14 @@ data Block = Block
 sha3_256 :: ByteString -> ByteString
 sha3_256 = BA.convert . hashWith SHA3_256
 
-calculateHash 
-  :: Index 
-  -> Hash 
-  -> Timestamp 
-  -> BlockData 
+calculateHash
+  :: Index
+  -> Hash
+  -> Timestamp
+  -> BlockData
   -> Int64
   -> ByteString
-calculateHash i p t d n = 
+calculateHash i p t d n =
   sha3_256 $ BS.concat [B8.pack (show i), p, B8.pack (show t), d, B8.pack (show n)]
 
 calculateHashForBlock :: Block -> Hash
@@ -77,10 +89,10 @@ calculateHashForBlock (Block i ph ts bd n _) = calculateHash i ph ts bd n
 -------------------------------------------------------------------------------
 
 now :: IO Integer
-now = round `fmap` getPOSIXTime 
+now = round `fmap` getPOSIXTime
 
 genesisBlock :: Block
-genesisBlock = Block index previousHash' timestamp' bdata' nonce' hash' 
+genesisBlock = Block index previousHash' timestamp' bdata' nonce' hash'
   where
     index         = 0
     previousHash' = "0" -- empty for genesis block
@@ -98,23 +110,23 @@ generateNextBlock previousBlock ts blockData =
       blockHash = calculateHash index previousHash' ts blockData nonce'
   in Block index previousHash' ts blockData nonce' blockHash
 
-proofOfWork 
+proofOfWork
   :: Index
   -> Hash
   -> Timestamp
   -> BlockData
   -> Int64
-proofOfWork idx prevHash ts bdata' = calcNonce 0  
+proofOfWork idx prevHash ts bdata' = calcNonce 0
   where
-    dbits = round $ logBase (2 :: Float) $ fromIntegral idx 
-    prefix = toS $ replicate dbits '0' 
+    dbits = round $ logBase (2 :: Float) $ fromIntegral idx
+    prefix = toS $ replicate dbits '0'
 
     calcNonce n
       | prefix' == prefix = n
       | otherwise = calcNonce $ n + 1
       where
-        hash' = calculateHash idx prevHash ts bdata' n 
-        prefix' = T.take dbits $ encode64 hash' 
+        hash' = calculateHash idx prevHash ts bdata' n
+        prefix' = T.take dbits $ encode64 hash'
 
 isValidBlock :: Block -> Block -> Maybe Text
 isValidBlock previousBlock newBlock
@@ -133,12 +145,12 @@ emptyBlockchain = []
 
 addBlock :: Block -> Blockchain -> Blockchain
 addBlock _ [] = []
-addBlock b (pb:bs) 
+addBlock b (pb:bs)
   | isNothing (isValidBlock pb b) = b : pb : bs
   | otherwise = pb : bs
 
 addBlockMVar :: Block -> MVar Blockchain -> IO ()
-addBlockMVar b = flip modifyMVar_ (return . addBlock b) 
+addBlockMVar b = flip modifyMVar_ (return . addBlock b)
 
 -------------------------------------------------------------------------------
 -- Serialization
@@ -174,30 +186,30 @@ decode64 = either (panic . toS) pure . BS64.decode . toS
 -- P2P
 -------------------------------------------------------------------------------
 
-data Msg 
+data Msg
   = QueryLatestBlock
   | QueryBlockchain
   | RespBlockchain Blockchain
-  | RespLatestBlock Block   
+  | RespLatestBlock Block
   deriving (Eq, Show, Generic, S.Serialize)
 
 type Sender = Msg -> IO ()
 
--- | Initializes a p2p node and returns a sender function so that 
+-- | Initializes a p2p node and returns a sender function so that
 --   the http server can broadcast messages to the p2p network
 p2p :: HostName -> PortNumber -> MVar Blockchain -> IO Sender
 p2p hostname p2pPort' chain = do -- TODO: Take buffer size as argument, max size of blockchain
   (nodeReceiver, nodeSender) <- M.initMulticast hostname p2pPort' 65536
-  prefix <- mkThreadDebugPrefix "p2p" 
-  void $ forkIO $ forever $ nodeReceiver >>= -- | Forever handle messages 
-    either (printWithPrefix prefix) (msgHandler nodeSender chain . fst) 
+  prefix <- mkThreadDebugPrefix "p2p"
+  void $ forkIO $ forever $ nodeReceiver >>= -- | Forever handle messages
+    either (printWithPrefix prefix) (msgHandler nodeSender chain . fst)
   return nodeSender
 
 -- | Main dispatch function to handle all messages received from network
 msgHandler :: Sender -> MVar Blockchain -> Msg -> IO ()
 msgHandler sender chain msg' = do
-  prefix <- mkThreadDebugPrefix "msgHandler" 
-  printWithPrefix prefix $ "Received Msg: " <> (show msg' :: Text) 
+  prefix <- mkThreadDebugPrefix "msgHandler"
+  printWithPrefix prefix $ "Received Msg: " <> (show msg' :: Text)
   case msg' of
     QueryLatestBlock -> do
       mBlock <- getLatestBlock chain
@@ -206,60 +218,61 @@ msgHandler sender chain msg' = do
         Just block -> sender $ RespLatestBlock block
     QueryBlockchain -> sender . RespBlockchain =<< readMVar chain
     RespLatestBlock block -> do
-      mMsg <- handleResponse chain [block] 
-      forM_ mMsg sender 
+      mMsg <- handleResponse chain [block]
+      forM_ mMsg sender
     RespBlockchain blockchain -> do
       mMsg <- handleResponse chain blockchain
-      forM_ mMsg sender 
+      forM_ mMsg sender
 
 handleResponse :: MVar Blockchain -> Blockchain -> IO (Maybe Msg)
 handleResponse chain chainResponse = do
   prefix <- mkThreadDebugPrefix "handleBlockchainResponse"
   case head chainResponse of
-    Nothing -> do 
-      printWithPrefix prefix "Empty response chain..." 
-      return Nothing 
+    Nothing -> do
+      printWithPrefix prefix "Empty response chain..."
+      return Nothing
     Just latestBlockRec -> do
       mLatestBlockHeld <- getLatestBlock chain
       case mLatestBlockHeld of
         Nothing -> do
-          printWithPrefix prefix "Empty local chain..." 
+          printWithPrefix prefix "Empty local chain..."
           return Nothing
         Just latestBlockHeld
-          | bindex latestBlockRec > bindex latestBlockHeld -> do 
+          | bindex latestBlockRec > bindex latestBlockHeld -> do
               printWithPrefix prefix "Local chain potentially behind..."
               respond latestBlockRec latestBlockHeld
-          | otherwise -> do 
+          | otherwise -> do
               printWithPrefix prefix "received chain is not longer than local."
               return Nothing
   where
-    respond latestBlockRec latestBlockHeld 
+    -- respond :: Block -> Block -> IO (Maybe Msg)
+    respond latestBlockRec latestBlockHeld
       | bhash latestBlockHeld == previousHash latestBlockRec = do
           addBlockMVar latestBlockRec chain
           return $ Just $ RespLatestBlock latestBlockRec
       | length chainResponse == 1 = return $ Just QueryBlockchain
-      | otherwise = do 
-          setChain chain chainResponse 
+      | otherwise = do
+          setChain chain chainResponse
           return $ Just $ RespLatestBlock latestBlockRec
 
 -- | Returns Nothing if chain should be replaced
-replaceChain :: Blockchain -> Blockchain -> Maybe Text 
+replaceChain :: Blockchain -> Blockchain -> Maybe Text
 replaceChain oldChain newChain = case isValidChain newChain of
-  Nothing 
+  Nothing
     | length newChain > length oldChain -> Nothing
     | otherwise -> Just "replaceChain: invalid chain"
-  Just err -> Just err 
+  Just err -> Just err
 
 -- | Replaces local block chain if new chain is longer
 setChain :: MVar Blockchain -> Blockchain -> IO ()
-setChain chain newChain = modifyMVar_ chain $ \oldChain -> 
+setChain chain newChain = modifyMVar_ chain $ \oldChain ->
   case replaceChain oldChain newChain of
     Nothing -> return newChain
-    Just err -> putStrLn err >> return oldChain 
+    Just err -> putStrLn err >> return oldChain
 
 -- | Queries latest block from peers
 connectToPeers :: Sender -> IO ()
-connectToPeers nodeSender = nodeSender QueryLatestBlock 
+connectToPeers nodeSender = nodeSender QueryLatestBlock
 
 -------------------------------------------------------------------------------
 -- Server
@@ -280,7 +293,7 @@ mineAndAppendBlock chain (Just latestBlock) = modifyMVar chain $ \chain' -> do
 
 -- | Starts httpServer for interaction via HTTP
 httpServer :: Peer -> MVar [Peer] -> MVar Blockchain -> Sender -> IO ()
-httpServer (Peer hostName' httpPort' p2pPort') peersMV chainMV p2pSender = 
+httpServer (Peer hostName' httpPort' p2pPort') peersMV chainMV p2pSender =
 
   scotty httpPort' $ do
 
@@ -293,16 +306,16 @@ httpServer (Peer hostName' httpPort' p2pPort') peersMV chainMV p2pSender =
       mNewBlock <- liftIO $ mineAndAppendBlock chainMV blk
       case mNewBlock of
         Nothing -> text "error mining block"
-        Just newBlock -> do 
+        Just newBlock -> do
           putStrLn $ "adding block with hash: " <> encode64 (bhash newBlock)
-          liftIO $ p2pSender $ RespLatestBlock newBlock 
-          json newBlock 
+          liftIO $ p2pSender $ RespLatestBlock newBlock
+          json newBlock
 
-    get "/peers" $ do 
+    get "/peers" $ do
       peers <- liftIO $ readMVar peersMV
       json peers
 
-    -- | Should be POST but can't query with browser unless GET 
+    -- | Should be POST but can't query with browser unless GET
     get "/addPeer/:httpPort" $ do
       newHttpPort <- param "httpPort"
       portsInUse <- liftIO $ getPortsInUse peersMV
@@ -311,27 +324,27 @@ httpServer (Peer hostName' httpPort' p2pPort') peersMV chainMV p2pSender =
          then text errMsg
       else do
         let newPeer = Peer hostName' newHttpPort p2pPort'
-        void $ liftIO $ forkIO $ 
+        void $ liftIO $ forkIO $
           initNode peersMV newPeer
         liftIO $ modifyMVar_ peersMV $ return . (:) newPeer
         json newPeer
 
--- | Initializes a node on the network with it's own copy of 
---   the blockchain, and invokes a p2p server and an http server 
+-- | Initializes a node on the network with it's own copy of
+--   the blockchain, and invokes a p2p server and an http server
 --   listening on `p2pPort` and `httpPort` respectively.
 initNode :: MVar [Peer] -> Peer -> IO ()
 initNode peersMV peer@(Peer hostName' _ p2pPort') = do
   chainMV <- newMVar [genesisBlock]
   nodeSender <- p2p hostName' p2pPort' chainMV
   connectToPeers nodeSender
-  httpServer peer peersMV chainMV nodeSender 
+  httpServer peer peersMV chainMV nodeSender
 
--- | Initializes all default nodes 
+-- | Initializes all default nodes
 initNodes :: MVar [Peer] -> IO ()
 initNodes peersMV = do
   peers <- readMVar peersMV
-  forM_ peers $ \peer -> 
-    forkIO $ initNode peersMV peer 
+  forM_ peers $ \peer ->
+    forkIO $ initNode peersMV peer
 
 type HttpPort = Int
 type P2PPort = PortNumber
@@ -339,18 +352,18 @@ data Peer = Peer
   { hostName :: HostName
   , httpPort :: HttpPort
   , p2pPort  :: P2PPort
-  } 
+  }
 
 instance ToJSON Peer where
-  toJSON (Peer hn hp pp) = 
-    object [ "hostName" .= toJSON hn  
-           , "httpPort" .= toJSON hp 
+  toJSON (Peer hn hp pp) =
+    object [ "hostName" .= toJSON hn
+           , "httpPort" .= toJSON hp
            , "p2pPort"  .= (fromIntegral pp :: Int)
            ]
- 
+
 defaultPeers :: IO (MVar [Peer])
 defaultPeers = newMVar peers
-  where 
+  where
     p2pPort' = 8000
     httpPorts = [3000,3001,3002]
     peers = Peer "224.0.0.1" <$> httpPorts <*> [p2pPort']
@@ -359,7 +372,7 @@ defaultPeers = newMVar peers
 getPortsInUse :: MVar [Peer] -> IO [Int]
 getPortsInUse peersMV = do
   peers <- readMVar peersMV
-  let (httpPorts,p2pPorts) = unzip $ 
+  let (httpPorts,p2pPorts) = unzip $
          map (httpPort &&& (fromIntegral . p2pPort)) peers
   return $ nub $ httpPorts ++ p2pPorts
 
@@ -371,7 +384,7 @@ main :: IO ()
 main = do
   peersMV <- defaultPeers
   initNodes peersMV
-  forever $ threadDelay 1000000
+  forever $ threadDelay 10000000
 
 -------------------------------------
 -- DEBUG
@@ -379,13 +392,13 @@ main = do
 
 mkThreadDebugPrefix :: Text -> IO Text
 mkThreadDebugPrefix funcName = do
-  threadIdStr <- show <$> myThreadId 
+  threadIdStr <- show <$> myThreadId
   return $ threadIdStr <> " - " <> funcName <> ": "
 
 -- | Set `debug` to `True` to enable logging
-printWithPrefix :: Text -> Text -> IO () 
-printWithPrefix prefix 
+printWithPrefix :: Text -> Text -> IO ()
+printWithPrefix prefix
   | debug = print . (<>) prefix . show
   | otherwise = const $ return ()
-  where -- | 
-    debug = False
+  where -- |
+    debug = True
